@@ -1,0 +1,67 @@
+name: $NAME
+
+on:
+  push:
+    branches:
+      - release
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT }}.dkr.ecr.ap-northeast-2.amazonaws.com
+          ECR_REPOSITORY: $NAME
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build a docker container and  push it to ECR.
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest . 
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:latest $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+    outputs:
+      tag: ${{ github.sha }}
+      result: "success"
+    
+  eks-deploy:
+    runs-on: self-hosted
+    needs:
+      - docker-build
+    if: needs.docker-build.outputs.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+      - name: EKS Login & helm deploy
+        run: |
+          aws eks --region ap-northeast-2 update-kubeconfig --name $CLUSTER_NAME
+      - name: helm upgrade
+        run: |
+          cd ./helm
+          helm upgrade -i $RELEASE . -n $NAMESPACE --set image.tag=${{ github.sha }}
+      - uses: skolobov/gh-action-slack@v1
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          status: ${{ job.status }}
+          steps: ${{ toJson(steps) }}
+          channel: '#SLACK_CHANNEL'
